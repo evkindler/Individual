@@ -59,3 +59,11 @@ model/outputs/
 model/inputs/
 inputs/
 
+Examples/
+P3-ALT.qmd
+*.docx
+P3/~WRL1645.tmp
+.gitignore
+*.jpg
+*.png
+

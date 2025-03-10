@@ -1,0 +1,366 @@
+---
+title: "P32"
+format: html
+editor: visual
+---
+
+# Load Necessary Information
+
+### Libraries
+
+```{r}
+
+library(tidyverse)
+library(here)
+library(knitr)
+library(srvyr)
+library(mlogit)
+library(caret)
+library(pscl)
+library(officer)
+library(flextable)
+library(caret)
+
+
+here("code",
+     "mlogit_helpers.R") |>
+  source()
+```
+
+### Datasets
+
+```{r}
+
+hh_data <- here("data",
+                "NHTS",
+                "hhpub.csv") |>
+  read_csv(show_col_types = FALSE) |>
+  filter(TRAVDAY != "01",
+          TRAVDAY != "07")
+
+person_data <- here("data",
+                    "NHTS",
+                    "perpub.csv") |>
+  read_csv(show_col_types = FALSE) |>
+  filter(TRAVDAY != "01",
+          TRAVDAY != "07")
+
+trip_data <- here("data",
+                    "NHTS",
+                    "trippub.csv") |>
+  read_csv(show_col_types = FALSE)  |>
+  filter(TRAVDAY != "01",
+          TRAVDAY != "07") |>
+  select(HOUSEID,
+         PERSONID,
+         TDTRPNUM,
+         TRIPPURP,
+         WHYFROM,
+         WHYTO,
+         TRPTRANS, 
+         R_AGE,
+         EDUC,
+         WTTRDFIN)
+```
+
+# Construct Trip Purposes
+
+```{r}
+
+exercise <- c("16")
+
+trip_data <- trip_data |>
+  mutate(purpose = case_when(WHYTO %in% exercise ~ "Workout",
+                             TRUE ~ "Non-Workout"))
+```
+
+# Summarize Trip Purposes
+
+### Sample
+
+```{r}
+
+trip_data |>
+  group_by(purpose) |>
+  summarise(`Number of trips (unweighted)` = n()) |>
+  mutate(`Percent of trips (unweighted)` = 
+           100 * `Number of trips (unweighted)`/
+           sum(`Number of trips (unweighted)`)) |>
+  arrange(desc(`Percent of trips (unweighted)`)) |>
+  kable(format.args = list(big.mark = ","), digits = 0)
+```
+
+### Population
+
+```{r}
+
+trip_data |>
+  as_survey_design(weights = WTTRDFIN) |>
+  group_by(purpose) |>
+  survey_tally() |>
+  mutate(`Percent of trips (weighted)` =  100*n / sum(n)) |>
+  rename(`Number of trips (weighted)` = n) |>
+  select(purpose, 
+         `Number of trips (weighted)`,
+         `Percent of trips (weighted)`) |>
+  arrange(desc(`Percent of trips (weighted)`)) |>
+  kable(format.args = list(big.mark = ","), digits = 0)
+```
+
+# Select Predictors
+
+### Household Level Predictors
+
+```{r}
+hh_data <- hh_data |>
+  mutate(veh_avail = case_when(
+    HHVEHCNT == 0 ~ "Zero",
+    DRVRCNT > HHVEHCNT ~ "Insuff.",
+    TRUE ~ "Suff."
+  )) |>
+  mutate(HHFAMINC = as.numeric(HHFAMINC)) |>
+  filter(HHFAMINC > 0) |>
+  mutate(income = case_when(
+    HHFAMINC < 4 ~ "low",
+    HHFAMINC < 5 & HHSIZE > 1 ~ "low",
+    HHFAMINC < 6 & HHSIZE > 3 ~ "low",
+    HHFAMINC < 7 & HHSIZE > 5 ~ "low",
+    HHFAMINC < 8 & HHSIZE > 7 ~ "low",
+    HHFAMINC > 8 ~ "high",
+    TRUE ~ "middle"
+  )) |>
+  mutate(income = factor(income, levels = c("low", "middle", "high"))) |>
+
+  select(HOUSEID,
+         HHSIZE,
+         WRKCOUNT,
+         veh_avail,
+         income)
+```
+
+### Individual Level Predictors
+
+```{r}
+people <- person_data |> 
+  select(HOUSEID, PERSONID, BIKE4EX, WALK4EX, CONDTRAV, HEALTH, PHYACT, EDUC, URBAN) |>
+  inner_join(hh_data) |> 
+  mutate(
+    # Travel exercise: 1 if the person bikes OR walks for exercise, else 0
+    travels_for_exercise = as.numeric((BIKE4EX > 0) | (suppressWarnings(as.numeric(WALK4EX)) > 0)),
+    
+    # Medical condition that reduces travel: 1 if true, else 0
+    medical_condition_reduces_travel = as.numeric(as.numeric(CONDTRAV) == 1),
+    
+    # Self-reported health opinion: 1 if healthy (HEALTH is 1, 2, or 3), else 0
+    health_opinion = as.numeric(as.numeric(HEALTH) %in% c(1, 2, 3)),
+    
+    # Physical activity indicator: 1 if active (PHYACT is 2 or 3), else 0
+    physically_active = as.numeric(as.numeric(PHYACT) %in% c(2, 3)),
+    
+    # College education indicator: 1 if college-educated (EDUC is 4 or 5), else 0
+    college_educated = as.numeric(as.numeric(EDUC) %in% c(4, 5)),
+    
+    # Urban residence indicator: 1 if urban (URBAN is 1 or 2), else 0
+    urban = as.numeric(as.numeric(URBAN) %in% c(1, 2))
+  )
+```
+
+### Add Predictors to People Dataset
+
+```{r}
+exercise_trips <- trip_data |>
+  filter(purpose == "Workout") |>
+  group_by(HOUSEID, PERSONID) |>
+  summarise(exercise_trips = n())
+
+people <- people |>
+  left_join(exercise_trips) |>
+  replace_na(list(exercise_trips = 0)) |>
+  mutate(income = factor(income, levels = c("low", "middle", "high")))
+```
+
+# Examine Distribution
+
+### Plot Histogram
+
+```{r}
+ggplot(people) +
+  geom_histogram(aes(x = exercise_trips),
+                 binwidth = 1,
+                 color = "gray",
+                 fill = "lightgreen") +
+  scale_x_continuous(name = "Number of exercise trips",
+                     breaks = seq(0, 12, by=1)) +
+  scale_y_continuous(name = "Number of people in sample") +
+  theme_minimal()
+```
+
+### Check Average and Variance
+
+```{r}
+people |>
+  summarise(`Average count of exercise trips` = mean(exercise_trips),
+            `Standard deviation` = sd(exercise_trips)) |>
+  kable(digits = 3)
+```
+
+### Show Range and Counts as a Table
+
+```{r}
+table(people$exercise_trips)
+```
+
+# Generate and Analyze Model
+
+### Estimate Zero-Inflated Poisson Regression
+
+```{r}
+exercise_model <- zeroinfl(exercise_trips ~ 
+                          WRKCOUNT +                          
+                          veh_avail +                          
+                          income +          
+                          travels_for_exercise +
+                          medical_condition_reduces_travel +
+                          health_opinion +
+                          physically_active +
+                          college_educated +
+                          urban,
+                        data = people,    
+                        dist = "negbin")  
+
+summary(exercise_model)
+```
+
+### Compare the Count Model to the Zero-Inflation Model Coefficients
+
+```{r}
+tibble(
+  Variable = names(exercise_model$coefficients$count),
+  
+  `Zero-inf count` = exercise_model$coefficients$count,  
+  `Zero-inf count p` = summary(exercise_model)$coefficients$count[1:12,4],
+  `Zero-inf zero` = exercise_model$coefficients$zero,  
+  `Zero-inf zero p` = summary(exercise_model)$coefficients$zero[,4]  
+) |>
+  kable(digits = 3)
+```
+
+### Plot Predicted Versus Observed Values
+
+```{r}
+exercise_results <- tibble(observed = exercise_model$model$exercise_trips, 
+                      predicted = exercise_model$fitted.values)
+
+ggplot(exercise_results) +   
+  geom_jitter(aes(x = observed,                  
+                  y = predicted),               
+              color = "lightgreen",               
+              alpha = 0.1,               
+              size = 0.1) +   
+  scale_x_continuous(name = "Number of observed trips per person",
+                     limits = c(-1, 12.5),
+                     breaks = seq(0, 12, by = 1)) +   
+  scale_y_continuous(name = "Number of predicted trips per person",
+                     limits = c(0, 2),
+                     breaks = seq(0, 2, by = 0.25)) +
+  theme_minimal()
+```
+
+### Generate Confusion Matrix
+
+```{r}
+exercise_results <- exercise_results |>
+  mutate(observed_cat = case_when(observed == 0 ~ "Zero",
+                                  observed == 1 ~ "One",
+                                  observed == 2 ~ "Two",
+                                  TRUE ~ "Three_plus"),
+         predicted_cat = case_when(round(predicted) == 0 ~ "Zero",
+                                   round(predicted) == 1 ~ "One",
+                                   round(predicted) == 2 ~ "Two",
+                                   TRUE ~ "Three_plus")) |>
+  mutate(observed_cat = factor(observed_cat,
+                               levels = c("Zero",
+                                          "One",
+                                          "Two",
+                                          "Three_plus")),
+         predicted_cat = factor(predicted_cat,
+                                levels = c("Zero",
+                                           "One",
+                                           "Two",
+                                           "Three_plus")))
+
+confusionMatrix(exercise_results$predicted_cat, exercise_results$observed_cat)
+```
+
+```{r}
+library(ggplot2)
+library(gridExtra)
+library(grid)
+library(tibble)
+
+# Prepare the table data
+regression_results <- tibble(
+  Variable = names(exercise_model$coefficients$count),
+  `Zero-inf count` = exercise_model$coefficients$count,  
+  `Zero-inf count p` = summary(exercise_model)$coefficients$count[1:12,4],
+  `Zero-inf zero` = exercise_model$coefficients$zero,  
+  `Zero-inf zero p` = summary(exercise_model)$coefficients$zero[,4]  
+)
+
+
+```
+
+```{r}
+# Create a grob (graphical object) from the table
+table_grob <- tableGrob(regression_results, rows = NULL)
+
+# Save the table as an image (JPEG)
+jpeg("regression_results.jpg", width = 1200, height = 600, res = 150)
+grid.draw(table_grob)
+dev.off()
+```
+
+```{r}
+library(flextable)
+library(officer)
+library(webshot2)  # Required for saving images
+library(ragg)  # High-quality rendering
+
+```
+
+```{r}
+# Function to style flextables and ensure it fits
+style_table <- function(ft) {
+  ft %>%
+    theme_booktabs() %>%
+    autofit() %>%
+    align(align = "center", part = "all") %>%
+    bold(part = "header") %>%
+    bg(bg = "#f4f4f4", part = "header") %>%
+    fontsize(size = 10, part = "all") %>%
+    width(j = 1:ncol(ft), width = 1.5)  # Adjust the width of columns
+}
+
+# Create formatted flextables
+cm_flex <- flextable(cm_table) |> 
+  set_caption("Confusion Matrix") |> 
+  style_table()
+
+overall_flex <- flextable(overall_stats) |> 
+  set_caption("Overall Statistics") |> 
+  style_table()
+
+class_flex <- flextable(class_stats) |> 
+  set_caption("Class-wise Statistics") |> 
+  style_table()
+
+
+```
+
+```{r}
+# Save tables as images with larger image size
+save_as_image(cm_flex, path = "confusion_matrix.png", webshot = "webshot2", vwidth = 1000, vheight = 500)
+save_as_image(overall_flex, path = "overall_stats.png", webshot = "webshot2", vwidth = 1000, vheight = 500)
+save_as_image(class_flex, path = "class_stats.png", webshot = "webshot2", vwidth = 1000, vheight = 500)
+
+```
