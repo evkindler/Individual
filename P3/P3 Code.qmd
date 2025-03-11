@@ -1,5 +1,5 @@
 ---
-title: "P32"
+title: "P3 Code"
 format: html
 editor: visual
 ---
@@ -290,77 +290,4 @@ exercise_results <- exercise_results |>
                                            "Three_plus")))
 
 confusionMatrix(exercise_results$predicted_cat, exercise_results$observed_cat)
-```
-
-```{r}
-library(ggplot2)
-library(gridExtra)
-library(grid)
-library(tibble)
-
-# Prepare the table data
-regression_results <- tibble(
-  Variable = names(exercise_model$coefficients$count),
-  `Zero-inf count` = exercise_model$coefficients$count,  
-  `Zero-inf count p` = summary(exercise_model)$coefficients$count[1:12,4],
-  `Zero-inf zero` = exercise_model$coefficients$zero,  
-  `Zero-inf zero p` = summary(exercise_model)$coefficients$zero[,4]  
-)
-
-
-```
-
-```{r}
-# Create a grob (graphical object) from the table
-table_grob <- tableGrob(regression_results, rows = NULL)
-
-# Save the table as an image (JPEG)
-jpeg("regression_results.jpg", width = 1200, height = 600, res = 150)
-grid.draw(table_grob)
-dev.off()
-```
-
-```{r}
-library(flextable)
-library(officer)
-library(webshot2)  # Required for saving images
-library(ragg)  # High-quality rendering
-
-```
-
-```{r}
-# Function to style flextables and ensure it fits
-style_table <- function(ft) {
-  ft %>%
-    theme_booktabs() %>%
-    autofit() %>%
-    align(align = "center", part = "all") %>%
-    bold(part = "header") %>%
-    bg(bg = "#f4f4f4", part = "header") %>%
-    fontsize(size = 10, part = "all") %>%
-    width(j = 1:ncol(ft), width = 1.5)  # Adjust the width of columns
-}
-
-# Create formatted flextables
-cm_flex <- flextable(cm_table) |> 
-  set_caption("Confusion Matrix") |> 
-  style_table()
-
-overall_flex <- flextable(overall_stats) |> 
-  set_caption("Overall Statistics") |> 
-  style_table()
-
-class_flex <- flextable(class_stats) |> 
-  set_caption("Class-wise Statistics") |> 
-  style_table()
-
-
-```
-
-```{r}
-# Save tables as images with larger image size
-save_as_image(cm_flex, path = "confusion_matrix.png", webshot = "webshot2", vwidth = 1000, vheight = 500)
-save_as_image(overall_flex, path = "overall_stats.png", webshot = "webshot2", vwidth = 1000, vheight = 500)
-save_as_image(class_flex, path = "class_stats.png", webshot = "webshot2", vwidth = 1000, vheight = 500)
-
 ```
