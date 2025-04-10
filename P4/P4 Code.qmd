@@ -1,0 +1,817 @@
+---
+title: "P4 Code"
+format: html
+editor: visual
+---
+
+# Load Libraries
+
+```{r}
+options(java.parameters = '-Xmx4G')
+
+library(tidyverse)
+library(here)
+library(knitr)
+library(tigris)
+library(stringr)
+library(maptiles)
+library(tidyterra)
+library(r5r)
+library(sf)
+library(leaflet)
+library(kableExtra)
+
+here("code",
+     "grvty_balancing.R") |>
+  source()
+```
+
+# Load CBSAs
+
+```{r}
+all_cbsas <- st_read(here("P4", "tl_2020_39_tabblock20", "tl_2020_39_tabblock20.shp"), quiet = TRUE)
+
+```
+
+# Select CBSA for Analysis
+
+```{r}
+lima_blocks <- all_cbsas |>
+  filter(STATEFP20 == "39", COUNTYFP20 == "003") |>
+  st_transform("WGS84")
+
+base_map <- get_tiles(lima_blocks,
+                      provider = "CartoDB.Positron",
+                      zoom = 11,
+                      crop = TRUE)
+
+ggplot() +
+  geom_spatraster_rgb(data = base_map) +
+  geom_sf(data = lima_blocks, fill = NA, color = "orange", size = 0.3) +
+  theme_void()
+```
+
+# Load Job Data
+
+```{r}
+state <- "oh"
+year <- "2020"
+
+lima_counties_5_digit <- c("39003")
+
+lima_counties_3_digit <- substr(lima_counties_5_digit, 3, 5)
+
+url <- paste0("https://lehd.ces.census.gov/data/lodes/LODES8/",
+              state,
+              "/od/",
+              state,
+              "_od_main_JT00_",
+              year,
+              ".csv.gz")
+
+pa_data <- read_csv(url)|>
+  mutate(w_county = substr(w_geocode, 1, 5),
+         h_county = substr(h_geocode, 1, 5)) |>
+  filter(h_county %in% lima_counties_5_digit &
+           w_county %in% lima_counties_5_digit) |>
+  mutate(w_geocode = as.character(w_geocode),
+         h_geocode = as.character(h_geocode))
+```
+
+# Aggregate Data to Zone Totals
+
+```{r}
+total_prod <- pa_data |>
+  group_by(h_geocode) |>
+  summarise(under_30_p = sum(SA01),
+            middle_aged_p = sum(SA02),
+            over_54_p = sum(SA03),
+            total_p = sum(S000))|>
+  rename(geocode = h_geocode)
+
+total_attr <- pa_data |>
+  group_by(w_geocode) |>
+  summarize(under_30_a = sum(SA01),
+            middle_aged_a = sum(SA02),
+            over_54_a = sum(SA03),
+            total_a = sum(S000)) |>
+  rename(geocode = w_geocode)
+
+trip_gen <- full_join(total_prod,
+                      total_attr) |>
+  replace_na(list(under_30_p = 0, 
+                  under_30_a = 0,
+                  middle_aged_p = 0,
+                  middle_aged_a = 0,
+                  over_54_p = 0,
+                  over_54_a = 0,
+                  total_p = 0,
+                  total_a = 0))
+
+head(trip_gen) |>
+  kable()
+```
+
+# Load Spatial Data
+
+```{r}
+msa_blocks <- lima_blocks
+
+ggplot(msa_blocks) +
+  geom_spatraster_rgb(data = base_map) +
+  geom_sf(fill = NA,
+          color = "orange") +
+  theme_void()
+```
+
+# Join Trip Generations to Blocks
+
+```{r}
+trip_gen_locs <- msa_blocks |>
+  rename(geocode = GEOID20) |>
+  right_join(trip_gen) |>
+  select(geocode, 
+         under_30_p,
+         middle_aged_p,
+         over_54_p,
+         total_p,
+         under_30_a,
+         middle_aged_a,
+         over_54_a,
+         total_a) |>
+  st_transform("WGS84")
+
+leaflet(trip_gen_locs) |>
+  addProviderTiles(provider = "CartoDB.Positron") |>
+  addPolygons(weight = 2,
+              color = "orange",
+              fillColor = "orange",
+              fillOpacity = 0.1,
+              highlightOptions = highlightOptions(weight = 3,
+                                                  fillOpacity = 0.5),
+              label = trip_gen_locs$geocode)
+```
+
+## Save Network Shapefiles
+
+```{r}
+lima_core <- here("P4",
+     "network") |>
+  setup_r5()
+
+street_vis <- street_network_to_sf(lima_core)
+
+street_lines <- street_vis$edges
+street_pts <- street_vis$vertices
+
+stop_r5()
+```
+
+## Load Street Lines and Points
+
+```{r}
+street_lines <- here("P4",
+                     "street-lines.shp") |>
+  st_read()
+
+street_pts <- here("P4",
+                     "street-pts.shp") |>
+  st_read()
+```
+
+## Check Street Network Covers Study Area
+
+```{r}
+base_map <- get_tiles(street_lines,
+                      provider = "CartoDB.Positron",
+                      zoom = 8,
+                      crop = TRUE)
+
+ggplot() +
+  geom_spatraster_rgb(data = base_map) +
+  geom_sf(data = trip_gen_locs,
+          color = "palegreen3",
+          fill = "palegreen") +
+  geom_sf(data = street_lines,
+          color =  "salmon") +
+  theme_void()
+```
+
+## Index Centroids' Nearest Network Point
+
+```{r}
+trip_gen_loc_ids <- trip_gen_locs |>
+  st_point_on_surface() |>
+  st_nearest_feature(street_pts)
+```
+
+## Set Nearest Network Points as Locations
+
+```{r}
+trip_gen_pts <- street_pts[trip_gen_loc_ids,] |>
+  mutate(id = trip_gen_locs$geocode) |>
+  select(id)
+```
+
+### Population Summary
+
+```{r}
+total_summary <- trip_gen |> 
+  summarise(
+    total_under_30_p = sum(under_30_p),
+    total_middle_aged_p = sum(middle_aged_p),
+    total_over_54_p = sum(over_54_p),
+    total_total_p = sum(total_p),
+    total_under_30_a = sum(under_30_a),
+    total_middle_aged_a = sum(middle_aged_a),
+    total_over_54_a = sum(over_54_a),
+    total_total_a = sum(total_a)
+  )
+
+total_summary
+```
+
+# Calculate Travel Time Matrix (Skim the Network)
+
+```{r}
+lima_core <- here("P4",
+     "Network") |>
+  setup_r5()
+
+skim <- travel_time_matrix(lima_core,
+                           origins = trip_gen_pts,
+                           destinations = trip_gen_pts,
+                           mode = "CAR",
+                           max_trip_duration = 180)
+
+stop_r5()
+```
+
+### Save Skim
+
+```{r}
+write_csv(skim, file = here("P4",
+                            "lima-skim.csv"))
+```
+
+### Load Skim
+
+```{r}
+skim <- read_csv(here("P4",
+                      "lima-skim.csv"),
+                 col_types = "ccn")
+```
+
+### Number of Rows
+
+```{r}
+nrow(skim)
+```
+
+# Apply Gravity Model
+
+## Select Decay Function Parameter
+
+```{r}
+flow_tt <- pa_data |>
+  rename(from_id = h_geocode,
+         to_id = w_geocode) |>
+  right_join(skim) |>
+  rename(flow_under_30 = SA01,
+         flow_middle_aged = SA02,
+         flow_over_54 = SA03,
+         flow_total = S000) |>
+  replace_na(list(flow_under_30 = 0,
+                  flow_middle_aged = 0,
+                  flow_over_54 = 0,
+                  flow_total = 0))
+
+avg_tts <- tibble(`Worker age` = c("Under 30", "Middle Aged" , "Over 54", "Total"),
+                  `Average travel time (observed)` = c(
+                    sum(flow_tt$flow_under_30 * flow_tt$travel_time_p50) / 
+                      sum(flow_tt$flow_under_30),
+                    sum(flow_tt$flow_middle_aged * flow_tt$travel_time_p50) / 
+                      sum(flow_tt$flow_middle_aged),
+                    sum(flow_tt$flow_over_54 * flow_tt$travel_time_p50) / 
+                      sum(flow_tt$flow_over_54),
+                    sum(flow_tt$flow_total * flow_tt$travel_time_p50) / 
+                      sum(flow_tt$flow_total)))
+                  
+kable(avg_tts, digits = 1)
+```
+
+```{r}
+betas <- 1/avg_tts$`Average travel time (observed)`
+names(betas) <- c("Under 30", "Middle Aged", "Over 54", "Total")
+
+initial_betas <- tibble(`Worker age` = names(betas),
+                  `Initial β value` = betas)
+                  
+kable(initial_betas, digits = 3)
+```
+
+## Visualize Sensitivity to Travel Times
+
+```{r}
+friction <- tibble(`Travel time (min)` = seq(0, 30, by=1)) |>
+  mutate(under_30 = exp(-1 * betas["Under 30"] * `Travel time (min)`),
+         middle_aged = exp(-1 * betas["Middle Aged"] * `Travel time (min)`),
+         over_54 = exp(-1 * betas["Over 54"] * `Travel time (min)`),
+         total = exp(-1 * betas["Total"] * `Travel time (min)`)) |>
+  pivot_longer(cols = -`Travel time (min)`,
+               names_to = "Age") |>
+  rename(`Destination attractiveness` = value) |>
+  mutate(Age = recode(Age,
+                      under_30 = "Under 30",
+                      middle_aged = "Middle",
+                      over_54 = "Over 54",
+                      total = "Total"),
+         Age = factor(Age, levels = c("Under 30", "Middle", "Over 54", "Total")))
+
+ggplot(friction) +
+  geom_line(aes(x = `Travel time (min)`,
+                y = `Destination attractiveness`,
+                color = Age)) +
+  scale_color_manual(values = c("Under 30" = "blue", 
+                                "Middle" = "green", 
+                                "Over 54" = "red", 
+                                "Total" = "black")) +
+  scale_x_continuous(breaks = seq(0, 30, by=5)) +
+  scale_y_continuous(breaks = seq(0, 1.1, by=0.1)) +
+  theme_minimal()
+
+ggsave("friction_plot.png", width = 8, height = 5, dpi = 300)
+
+```
+
+### Save Image of Graph
+
+```{r}
+plot <- ggplot(friction) +
+  geom_line(aes(x = `Travel time (min)`,
+                y = `Destination attractiveness`,
+                linetype = Age)) +
+  scale_x_continuous(breaks = seq(0, 30, by=5)) +
+  scale_y_continuous(breaks = seq(0, 1.1, by=0.1)) +
+  theme_minimal()
+
+# Save the plot as PNG
+ggsave("friction_plot.png", plot = plot, width = 8, height = 5, dpi = 300)
+```
+
+## Calculate Friction Factors
+
+```{r}
+flow_tt <- flow_tt |>
+  mutate(friction_under_30 = exp(-1 * betas["Under 30"] * travel_time_p50),
+         friction_middle_aged = exp(-1 * betas["Middle Aged"] * travel_time_p50),
+         friction_over_54 = exp(-1 * betas["Over 54"] * travel_time_p50),
+         friction_total = exp(-1 * betas["Total"] * travel_time_p50))
+```
+
+## Estimate Initial Trip Matrix
+
+```{r}
+flow_under_30_est <- grvty_balancing(od_zones = trip_gen,
+                                  friction = flow_tt,
+                                  zone_id = "geocode",
+                                  zone_o = "under_30_p",
+                                  zone_d = "under_30_a",
+                                  friction_o_id = "from_id",
+                                  friction_d_id = "to_id",
+                                  friction_factor = "friction_under_30",
+                                  tolerance = 0.001,
+                                  max_iter = 100)
+flow_middle_aged_est <- grvty_balancing(od_zones = trip_gen,
+                                  friction = flow_tt,
+                                  zone_id = "geocode",
+                                  zone_o = "middle_aged_p",
+                                  zone_d = "middle_aged_a",
+                                  friction_o_id = "from_id",
+                                  friction_d_id = "to_id",
+                                  friction_factor = "friction_middle_aged",
+                                  tolerance = 0.001,
+                                  max_iter = 100)
+
+flow_over_54_est <- grvty_balancing(od_zones = trip_gen,
+                                  friction = flow_tt,
+                                  zone_id = "geocode",
+                                  zone_o = "over_54_p",
+                                  zone_d = "over_54_a",
+                                  friction_o_id = "from_id",
+                                  friction_d_id = "to_id",
+                                  friction_factor = "friction_over_54",
+                                  tolerance = 0.001,
+                                  max_iter = 100)
+
+flow_total_est <- grvty_balancing(od_zones = trip_gen,
+                                  friction = flow_tt,
+                                  zone_id = "geocode",
+                                  zone_o = "total_p",
+                                  zone_d = "total_a",
+                                  friction_o_id = "from_id",
+                                  friction_d_id = "to_id",
+                                  friction_factor = "friction_total",
+                                  tolerance = 0.001,
+                                  max_iter = 100)
+
+```
+
+## Save Outputs
+
+```{r}
+write_csv(flow_under_30_est$flows,
+          file = here("P4",
+                      "init-under-30-flow.csv"))
+write_csv(flow_middle_aged_est$flows,
+          file = here("P4",
+                      "init-middle-aged-flow.csv"))
+
+write_csv(flow_over_54_est$flows,
+          file = here("P4",
+                      "init-over-54-flow.csv"))
+
+write_csv(flow_total_est$flows,
+          file = here("P4",
+                      "init-total-flow.csv"))
+```
+
+# Evaluate Model Fit
+
+## Average Travel Time
+
+```{r}
+flow_under_30 <- here("P4",
+                  "init-under-30-flow.csv") |>
+  read_csv(col_types = "ccn") |>
+  rename(from_id = o_id,
+         to_id = d_id,
+         under_30_flow_est = flow)
+
+flow_middle_aged <- here("P4",
+                  "init-middle-aged-flow.csv") |>
+  read_csv(col_types = "ccn") |>
+  rename(from_id = o_id,
+         to_id = d_id,
+         middle_aged_flow_est = flow)
+
+flow_over_54 <- here("P4",
+                  "init-over-54-flow.csv") |>
+  read_csv(col_types = "ccn") |>
+  rename(from_id = o_id,
+         to_id = d_id,
+         over_54_flow_est = flow)
+
+flow_total <- here("P4",
+                  "init-total-flow.csv") |>
+  read_csv(col_types = "ccn") |>
+  rename(from_id = o_id,
+         to_id = d_id,
+         total_flow_est = flow)
+
+flow_tt <- flow_tt |>
+  left_join(flow_under_30) |>
+  left_join(flow_middle_aged) |>
+  left_join(flow_over_54) |>
+  left_join(flow_total)
+
+avg_tts <- avg_tts |>
+  mutate(`Average travel time (estimated)` = c(
+    sum(flow_tt$under_30_flow_est * flow_tt$travel_time_p50) / 
+      sum(flow_tt$under_30_flow_est),
+    sum(flow_tt$middle_aged_flow_est * flow_tt$travel_time_p50) / 
+      sum(flow_tt$middle_aged_flow_est),
+    sum(flow_tt$over_54_flow_est * flow_tt$travel_time_p50) / 
+      sum(flow_tt$over_54_flow_est),
+    sum(flow_tt$total_flow_est * flow_tt$travel_time_p50) / 
+      sum(flow_tt$total_flow_est)))
+
+avg_tts |>
+  kable(digits = 1)
+```
+
+## Root Mean Squared Error
+
+```{r}
+avg_tts <- avg_tts |>
+  mutate(rmse = c((mean((flow_tt$flow_under_30 - flow_tt$under_30_flow_est)^2))^0.5,
+                  (mean((flow_tt$flow_middle_aged - flow_tt$middle_aged_flow_est)^2))^0.5,
+                  (mean((flow_tt$flow_over_54 - flow_tt$over_54_flow_est)^2))^0.5,
+                
+                  (mean((flow_tt$flow_total - flow_tt$total_flow_est)^2))^0.5))
+
+kable(avg_tts, digits = 2)
+```
+
+## Visualization
+
+```{r}
+plot_flows <- function(flow_df,
+                       obs_col_name,
+                       est_col_name) {
+  
+  summary <- flow_df |>
+    rename(obs = all_of(obs_col_name),
+           est = all_of(est_col_name)) |>
+    group_by(obs, est) |>
+    summarize(n = n()) 
+  
+  max_scale <- max(summary$obs, summary$est)
+  my_interval <- ceiling(max_scale / 10)
+  dot_size <- floor(70 / max_scale)
+  
+  max_n_exp = round(log10(max(summary$n)))
+  
+  ggplot(summary) +
+    geom_point(aes(x = obs,
+                   y = est,
+                   color = n),
+               size = dot_size) +
+    scale_x_continuous(name = "Observed flow", 
+                       limits = c(0, max_scale),
+                       breaks = seq(0, max_scale, by=my_interval)) +
+    scale_y_continuous(name = "Estimated flow", 
+                       limits = c(0, max_scale),
+                       breaks = seq(0, max_scale, by=my_interval)) +
+    scale_color_viridis_c(transform = "log",
+                          breaks = my_breaks <- c(10^seq(-1, 
+                                                         max_n_exp, 
+                                                         by=1)),
+                          labels = formatC(my_breaks, format = "d", 
+                                           big.mark = ","),
+                          direction = -1,
+                          name = "Number of P-A pairs") +
+    theme_minimal()
+  
+    
+}
+```
+
+### Under 30 Workers
+
+```{r}
+plot_flows(flow_tt, 
+           obs_col_name = "flow_under_30",
+           est_col_name = "under_30_flow_est")
+```
+
+### Middle Aged Workers
+
+```{r}
+plot_flows(flow_tt, 
+           obs_col_name = "flow_middle_aged",
+           est_col_name = "middle_aged_flow_est")
+```
+
+### Over 54 Workers
+
+```{r}
+plot_flows(flow_tt, 
+           obs_col_name = "flow_over_54",
+           est_col_name = "over_54_flow_est")
+```
+
+### All Workers
+
+```{r}
+plot_flows(flow_tt, 
+           obs_col_name = "flow_total",
+           est_col_name = "total_flow_est")
+```
+
+# Calibrate Gravity Model
+
+```{r}
+flow_tt <- flow_tt |>
+  select(-under_30_flow_est,
+         -middle_aged_flow_est,
+         -over_54_flow_est,
+         -total_flow_est)
+
+## Calibrate under 30 beta
+calibrated_flows_under_30 <- grvty_calibrate(obs_flow_tt = flow_tt,
+                                          o_id_col = "from_id",
+                                          d_id_col = "to_id",
+                                          obs_flow_col = "flow_under_30",
+                                          tt_col = "travel_time_p50",
+                                          tolerance_balancing = 0.0001,
+                                          max_iter_balancing = 30,
+                                          tolerance_calibration = 0.2,
+                                          max_iter_calibration = 30)
+
+beta_under_30 <- calibrated_flows_under_30$beta
+
+under_30_flow_est <- calibrated_flows_under_30$flows |>
+  rename(from_id = o_id,
+         to_id = d_id,
+         under_30_flow_est = flow_est) |>
+  select(from_id, to_id, under_30_flow_est)
+
+flow_tt <- flow_tt |>
+  left_join(under_30_flow_est)
+
+## Calibrate middle aged beta
+calibrated_flows_middle_aged <- grvty_calibrate(obs_flow_tt = flow_tt,
+                                          o_id_col = "from_id",
+                                          d_id_col = "to_id",
+                                          obs_flow_col = "flow_middle_aged",
+                                          tt_col = "travel_time_p50",
+                                          tolerance_balancing = 0.0001,
+                                          max_iter_balancing = 30,
+                                          tolerance_calibration = 0.2,
+                                          max_iter_calibration = 30)
+
+beta_middle_aged <- calibrated_flows_middle_aged$beta
+
+middle_aged_flow_est <- calibrated_flows_middle_aged$flows |>
+  rename(from_id = o_id,
+         to_id = d_id,
+         middle_aged_flow_est = flow_est) |>
+  select(from_id, to_id, middle_aged_flow_est)
+
+flow_tt <- flow_tt |>
+  left_join(middle_aged_flow_est)
+
+## Calibrate over 54 beta
+calibrated_flows_over_54 <- grvty_calibrate(obs_flow_tt = flow_tt,
+                                          o_id_col = "from_id",
+                                          d_id_col = "to_id",
+                                          obs_flow_col = "flow_over_54",
+                                          tt_col = "travel_time_p50",
+                                          tolerance_balancing = 0.0001,
+                                          max_iter_balancing = 30,
+                                          tolerance_calibration = 0.2,
+                                          max_iter_calibration = 30)
+
+beta_over_54 <- calibrated_flows_over_54$beta
+
+over_54_flow_est <- calibrated_flows_over_54$flows |>
+  rename(from_id = o_id,
+         to_id = d_id,
+         over_54_flow_est = flow_est) |>
+  select(from_id, to_id, over_54_flow_est)
+
+flow_tt <- flow_tt |>
+  left_join(over_54_flow_est)
+
+## Calibrate total beta
+calibrated_flows_total <- grvty_calibrate(obs_flow_tt = flow_tt,
+                                          o_id_col = "from_id",
+                                          d_id_col = "to_id",
+                                          obs_flow_col = "flow_total",
+                                          tt_col = "travel_time_p50",
+                                          tolerance_balancing = 0.0001,
+                                          max_iter_balancing = 30,
+                                          tolerance_calibration = 0.2,
+                                          max_iter_calibration = 30)
+
+beta_total <- calibrated_flows_total$beta
+
+total_flow_est <- calibrated_flows_total$flows |>
+  rename(from_id = o_id,
+         to_id = d_id,
+         total_flow_est = flow_est) |>
+  select(from_id, to_id, total_flow_est)
+
+flow_tt <- flow_tt |>
+  left_join(total_flow_est)
+
+
+betas_table <- tibble(Industry = c("Under 30", 
+                                   "Middle Aged",
+                                   "Over 54",
+                                   "Total"),
+                      beta_initial = betas,
+                      beta_calibrated = c(beta_under_30,
+                                          beta_middle_aged,
+                                          beta_over_54,
+                                          beta_total))
+write_csv(flow_tt,
+          here("P4",
+              "calib-flows.csv"))
+
+write_csv(betas_table,
+          here("P4",
+              "calib-betas.csv"))
+
+```
+
+# Evaluate Fit
+
+## Average Travel Time
+
+```{r}
+flow_tt <- here("P4",
+               "calib-flows.csv") |>
+  read_csv()
+
+avg_tts <- avg_tts |>
+  select(-rmse) |>
+  mutate(`Average travel time (estimated)` = c(
+    sum(flow_tt$under_30_flow_est * flow_tt$travel_time_p50) / 
+      sum(flow_tt$under_30_flow_est),
+    sum(flow_tt$middle_aged_flow_est * flow_tt$travel_time_p50) / 
+      sum(flow_tt$middle_aged_flow_est),
+    sum(flow_tt$over_54_flow_est * flow_tt$travel_time_p50) / 
+      sum(flow_tt$over_54_flow_est),
+    sum(flow_tt$total_flow_est * flow_tt$travel_time_p50) / 
+      sum(flow_tt$total_flow_est)))
+
+
+avg_tts |>
+  kable(digits = 1)
+```
+
+## Root Mean Square Error
+
+```{r}
+avg_tts <- avg_tts |>
+  mutate(
+    rmse = c(
+      sqrt(mean((flow_tt$flow_under_30 - flow_tt$under_30_flow_est)^2)),
+      sqrt(mean((flow_tt$flow_middle_aged - flow_tt$middle_aged_flow_est )^2)),
+      sqrt(mean((flow_tt$flow_over_54 - flow_tt$over_54_flow_est)^2)),
+      sqrt(mean((flow_tt$flow_total - flow_tt$total_flow_est)^2))
+    )
+  )
+
+kable(avg_tts, digits = 2)
+
+```
+
+## Visual Flows
+
+### Under 30 Workers
+
+```{r}
+plot_flows(flow_tt,
+           obs_col_name = "flow_under_30",
+           est_col_name = "under_30_flow_est")
+```
+
+### Middle Aged Workers
+
+```{r}
+plot_flows(flow_tt,
+           obs_col_name = "flow_middle_aged",
+           est_col_name = "middle_aged_flow_est")
+```
+
+### Over 54 Workers
+
+```{r}
+plot_flows(flow_tt,
+           obs_col_name = "flow_over_54",
+           est_col_name = "over_54_flow_est")
+```
+
+### Total
+
+```{r}
+plot_flows(flow_tt,
+           obs_col_name = "flow_total",
+           est_col_name = "total_flow_est")
+```
+
+## New Calibrated Parameters
+
+```{r}
+betas_table <- here("P4", "calib-betas.csv") |> 
+  read_csv()
+
+friction <- tibble(`Travel time (min)` = seq(1, 60, by = 1)) |>
+  mutate(
+    Young = exp(-1 * betas_table$beta_calibrated[1] * `Travel time (min)`),
+    Middle = exp(-1 * betas_table$beta_calibrated[2] * `Travel time (min)`),
+    Old = exp(-1 * betas_table$beta_calibrated[3] * `Travel time (min)`),
+    Total = exp(-1 * betas_table$beta_calibrated[4] * `Travel time (min)`)
+  ) |>
+  pivot_longer(cols = -`Travel time (min)`, names_to = "Age") |>
+  mutate(Age = recode(Age,
+                      "Young" = "Under 30",
+                      "Middle" = "30 to 54",
+                      "Old" = "Over 54"),
+         Age = factor(Age, levels = c("Under 30", "30 to 54", "Over 54", "Total"))) |>
+  rename(`Destination attractiveness` = value) |>
+  filter(`Destination attractiveness` < 4)
+
+ggplot(friction) +
+  geom_line(aes(x = `Travel time (min)`, 
+                y = `Destination attractiveness`, 
+                color = Age), 
+            size = 1.2) +  # All lines solid now
+  scale_x_continuous(breaks = seq(0, 60, by = 5)) +
+  scale_y_continuous(breaks = seq(0, 4, by = 0.5), limits = c(0, 4)) +
+  scale_color_manual(values = c("Under 30" = "blue", 
+                                "30 to 54" = "green", 
+                                "Over 54" = "red", 
+                                "Total" = "black")) +
+  theme_minimal() +
+  labs(title = "Destination Attractiveness by Travel Time",
+       x = "Travel Time (minutes)",
+       y = "Destination Attractiveness",
+       color = "Age")
+
+ggsave("new_plot.png", width = 8, height = 5, dpi = 300)
+
+```
