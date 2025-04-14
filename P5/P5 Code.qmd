@@ -1,0 +1,315 @@
+---
+title: "P5 Code"
+format: html
+editor: visual
+---
+
+# Load Libraries
+
+```{r}
+library(tidyverse)
+library(here)
+library(knitr)
+library(srvyr)
+library(tidycensus)
+library(jtools)
+library(ggplot2)
+```
+
+# Load Datasets and Join
+
+```{r}
+trips <- here("data",
+              "NHTS",
+              "trippub.csv") |>
+  read_csv(show_col_types = FALSE)
+```
+
+```{r}
+people <- here("data",
+               "NHTS",
+               "perpub.csv") |>
+  read_csv(show_col_types = FALSE)
+```
+
+```{r}
+trips_people <- trips |>
+  left_join(people, by = c("HOUSEID", "PERSONID")) 
+```
+
+# Generate Outcome Variables
+
+```{r}
+short_trips_people <- trips_people |>
+  filter(TRPMILES < 1.5) |>
+  mutate(walk = TRPTRANS == "01")
+
+```
+
+```{r}
+short_trips_people |>
+  mutate(Mode = factor(ifelse(walk, "Walk", "Other mode"),
+                       levels = c("Walk", "Other mode"))) |>
+  group_by(Mode) |>
+  summarise(`Number of trips` = n()) |>
+  mutate(`Percent of trips` = 
+           paste0(round(100*`Number of trips`/sum(`Number of trips`)), "%")) |>
+  kable()
+```
+
+```{r}
+short_trips_people |>
+  as_survey_design(weights = WTTRDFIN) |>
+  mutate(Mode = factor(ifelse(walk, "Walk", "Other mode"),
+                       levels = c("Walk", "Other mode"))) |>
+  group_by(Mode) |>
+  survey_tally(vartype = "ci") |>
+  mutate(`Estimated percent of trips` = 
+           paste0(round(100*n/sum(n)),"%"),
+         `Lower estimate (95% confidence)` = 
+           paste0(round(100*n_low/sum(n)),"%"),
+         `Upper estimate (95% confidence)` = 
+           paste0(round(100*n_upp/sum(n)),"%")) |>
+  select(Mode,
+         `Estimated percent of trips`,
+         `Lower estimate (95% confidence)`,
+         `Upper estimate (95% confidence)`) |>
+  kable()
+```
+
+# Choose Predictors
+
+### Distance
+
+```{r}
+ggplot(short_trips_people) +
+  geom_histogram(aes(x = TRPMILES),
+                 color = "gray",
+                 fill = "cornsilk",
+                 bins = 10) +
+  scale_x_continuous(name = "Trip distance (miles)", limits = c(0, 2)) +
+  scale_y_continuous(name = "Number of trips in sample") +
+  theme_minimal()
+```
+
+### Age
+
+```{r}
+ggplot(short_trips_people) +
+  geom_histogram(aes(x = R_AGE.x),
+                 color = "gray",
+                 fill = "cornsilk",
+                 binwidth = 1) +
+  scale_x_continuous(name = "Traveler's age (years)",
+                     breaks = seq(0, 1.5, by=0.1)) +
+  scale_y_continuous(name = "Number of trips in sample") +
+  theme_minimal()
+```
+
+### Density
+
+```{r}
+short_trips_people <- short_trips_people |>
+  filter(DBPPOPDN > 0)
+
+density_values <- c(50, 300, 750, 1500, 3000, 7000, 17000, 30000)
+
+ggplot(short_trips_people) +
+  geom_histogram(aes(x = DBPPOPDN),
+                 color = "gray",
+                 fill = "cornsilk",
+                 bins = 30) +
+  scale_x_continuous(breaks = density_values,
+                 labels = density_values,
+                 transform = "log",
+                 name = paste0("Population density of destination\n",
+                               "block group (people per sq-mi)")) +
+  scale_y_continuous(name = "Number of trips in sample") +
+  theme_minimal()
+```
+
+### Birthplace
+
+```{r}
+short_trips_people|>
+  group_by(BORNINUS) |>
+  summarise(`Number of trips` = n())
+```
+
+```{r}
+short_trips_people <- short_trips_people |>
+  filter(!BORNINUS %in% c("-7", "-8", "-9")) |>
+  mutate(born_us = BORNINUS == "01")
+```
+
+```{r}
+short_trips_people|>
+  group_by(BORNINUS) |>
+  summarise(`Number of trips` = n())
+```
+
+### Income
+
+```{r}
+states_in_sample <- unique(trips$HHSTATE)
+
+all_pums <- get_pums(variables = c("FINCP", "AGEP"),
+                     state = states_in_sample,
+                     survey = "acs1",
+                     year = 2018,
+                     recode = TRUE)
+```
+
+```{r}
+sr_pums <- all_pums |>
+  filter(AGEP > 65) |>
+  filter(FINCP >= 0) |>
+  mutate(inc_cat = case_when(FINCP < 10000 ~ "01",
+                             FINCP < 15000 ~ "02",
+                             FINCP < 25000 ~ "03",
+                             FINCP < 35000 ~ "04",
+                             FINCP < 50000 ~ "05",
+                             FINCP < 75000 ~ "06",
+                             FINCP < 100000 ~ "07",
+                             FINCP < 125000 ~ "08",
+                             FINCP < 150000 ~ "09",
+                             FINCP < 200000 ~ "10",
+                             TRUE ~ "11"))
+
+pums_summary <- sr_pums |>
+  group_by(inc_cat) |>
+  summarise(`Median income` = median(FINCP))
+
+pums_summary|>
+  kable(format.args = list(big.mark = ","))
+```
+
+```{r}
+short_trips_people <- short_trips_people|>
+  mutate(HHFAMINC = as.numeric(HHFAMINC.x)) |>
+  filter(HHFAMINC > 0) |>
+  mutate(income = pums_summary$`Median income`[HHFAMINC])
+
+ggplot(short_trips_people) +
+  geom_histogram(aes(x = income),
+                 bins = 20,
+                 color = "gray",
+                 fill = "cornsilk") +
+  scale_x_continuous(transform = "log",
+                     breaks = breaks <- 5000*2^seq(0, 6, by=1),
+                     labels = paste0("$", formatC(breaks, 
+                                                  format = "d",
+                                                  big.mark = ",")),
+                     name = "Annual household income") +
+  scale_y_continuous(name = "Number of trips in sample") +
+  theme_minimal()
+```
+
+### Vehilce Availability
+
+```{r}
+short_trips_people <- short_trips_people |>
+  mutate(zero_veh = HHVEHCNT.x ==0)
+```
+
+### Sample Size
+
+```{r}
+nrow(short_trips_people)
+```
+
+```{r}
+short_trips_people|>
+  group_by(BORNINUS) |>
+  summarise(`Number of trips` = n())
+```
+
+# **Estimate model**
+
+```{r}
+model <- glm(walk ~ 
+               TRPMILES +
+               R_AGE.x +
+               DBPPOPDN +
+               born_us +
+               income +
+               zero_veh,
+             data = short_trips_people,
+             family = "binomial")
+
+coeff_labels <- c("Trip distance (miles)" = "TRPMILES",
+                  "Age (years)" = "R_AGE.x",
+                  "Block-group population density at destination" = "DBPPOPDN",
+                  "Born in US" = "born_usTRUE",
+                  "Annual household income" = "income",
+                  "Zero-vehicle household" = "zero_vehTRUE")
+
+export_summs(model, 
+             robust = "HC3", 
+             coefs = coeff_labels,
+             error_format = "(p = {p.value})",
+             error_pos = "right")
+```
+
+```{r}
+export_summs(model, 
+             robust = "HC3", 
+             coefs = coeff_labels,
+             error_format = "(p = {p.value})",
+             error_pos = "same",
+             to.file = "Word",
+             file.name = here("P5",
+                              "model-result.docx"))
+```
+
+# Graph Differences
+
+## Probability Over Distance
+
+```{r}
+trip_distance_values <- seq(0, 5, by = 0.1)
+
+new_data <- expand.grid(
+  TRPMILES = trip_distance_values,
+  born_us = c(TRUE, FALSE)  
+)
+
+new_data$R_AGE.x <- mean(short_trips_people$R_AGE.x, na.rm = TRUE)
+new_data$DBPPOPDN <- mean(short_trips_people$DBPPOPDN, na.rm = TRUE)
+new_data$income <- mean(short_trips_people$income, na.rm = TRUE)  
+new_data$zero_veh <- mean(short_trips_people$zero_veh, na.rm = TRUE) == 1 
+
+new_data$predicted_prob <- predict(model, newdata = new_data, type = "response")
+
+plot <- ggplot(new_data, aes(x = TRPMILES, y = predicted_prob, color = factor(born_us))) +
+  geom_line(size = 1.2) + 
+  scale_color_manual(values = c("blue", "red"), labels = c("Born in US", "Born outside US")) + 
+  labs(
+    x = "Trip distance (miles)",
+    y = "Probability of walking",
+    color = "Birthplace"
+  ) +
+  xlim(0, 1.5) + 
+  theme_minimal() +
+  theme(legend.position = "top")
+
+ggsave("plot_graph_born_status.png", plot = plot, width = 8, height = 6, dpi = 300)
+
+
+```
+
+## Confidence Interval
+
+```{r}
+p <- effect_plot(model = model, pred = "born_us", interval = TRUE) +
+  scale_y_continuous(name = "Probability of walking for a short trip",
+                     breaks = seq(0.2, 0.3, by = 0.02),  
+                     labels = paste0(seq(0.2, 0.3, by = 0.02) * 100, "%"),
+                     limits = c(0.2, 0.3)) + 
+  scale_x_discrete(name = "Was this person born in the US?",
+                   labels = c("No", "Yes"))
+
+ggsave("effect_plot_born_us.png", plot = p, width = 6, height = 4, dpi = 300)
+
+
+```
